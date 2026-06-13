@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Three-Body Problem (PPG Edition)</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@700;900&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a0a2e; overflow: hidden; width: 100vw; height: 100vh; font-family: 'Fredoka One', cursive; }
+  canvas { display: block; position: absolute; top: 0; left: 0; }
+
+  #ui { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; }
+
+  #title-box {
+    position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+    background: #fff; border: 4px solid #000; border-radius: 18px;
+    padding: 8px 28px 10px; box-shadow: 5px 5px 0 #000; text-align: center; white-space: nowrap;
+  }
+  #title-box h1 { font-size: 22px; color: #1a0a2e; letter-spacing: 0.02em; line-height: 1.1; }
+  #title-box p  { font-family: 'Nunito', sans-serif; font-size: 10px; font-weight: 700; color: #888; letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px; }
+
+  #legend {
+    position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 18px; align-items: center;
+  }
+  .legend-item {
+    background: #fff; border: 3px solid #000; border-radius: 14px; padding: 5px 16px 6px;
+    box-shadow: 3px 3px 0 #000; display: flex; align-items: center; gap: 8px;
+    pointer-events: all; cursor: pointer; transition: transform 0.1s; user-select: none;
+  }
+  .legend-item:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 #000; }
+  .legend-dot  { width: 16px; height: 16px; border-radius: 50%; border: 2.5px solid #000; flex-shrink: 0; }
+  .legend-name { font-size: 13px; color: #111; line-height: 1; }
+
+  #chaos-meter {
+    position: absolute; top: 22px; right: 24px; background: #fff;
+    border: 3px solid #000; border-radius: 14px; padding: 8px 14px;
+    box-shadow: 4px 4px 0 #000; text-align: center;
+  }
+  #chaos-meter .label { font-size: 10px; font-family: 'Nunito', sans-serif; font-weight: 900; text-transform: uppercase; letter-spacing: 0.08em; color: #888; }
+  #chaos-meter .value { font-size: 20px; color: #e040fb; line-height: 1.1; }
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<canvas id="main"></canvas>
+
+<div id="ui">
+  <div id="title-box">
+    <h1>⚡ The Three-Body Problem ⚡</h1>
+    <p>Powerpuff Girls Edition · Click bodies to zap!</p>
+  </div>
+  <div id="chaos-meter">
+    <div class="label">Chaos Level</div>
+    <div class="value" id="chaos-val">😌</div>
+  </div>
+  <div id="legend">
+    <div class="legend-item" onclick="resetSim()">
+      <div class="legend-dot" style="background:#ff6eb4;"></div>
+      <span class="legend-name">Reset</span>
+    </div>
+    <div class="legend-item" onclick="toggleTrails()">
+      <div class="legend-dot" style="background:#74d7f7;"></div>
+      <span class="legend-name" id="trail-label">Trails: On</span>
+    </div>
+    <div class="legend-item" onclick="togglePause()">
+      <div class="legend-dot" style="background:#7fff7f;"></div>
+      <span class="legend-name" id="pause-label">Pause</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Canvas ────────────────────────────────────────────────────────────────────
+const bgCanvas = document.getElementById('bg');
+const canvas   = document.getElementById('main');
+const bgCtx    = bgCanvas.getContext('2d');
+const ctx      = canvas.getContext('2d');
+
+let W, H, CX, CY;
+
+// ── PPG palette ───────────────────────────────────────────────────────────────
+const PPG = [
+  { name: 'Blossom',   color: '#ff6eb4', dark: '#c9006b', eye: '#ff0055', hair: '#6b1010' },
+  { name: 'Bubbles',   color: '#74d7f7', dark: '#0099cc', eye: '#0055cc', hair: '#f5d800' },
+  { name: 'Buttercup', color: '#7fff7f', dark: '#22aa22', eye: '#005500', hair: '#1a2a00' },
+];
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let bodies   = [];
+let trails   = [[], [], []];  // world-space [x, y] arrays
+let sparkles = [];
+let paused     = false;
+let showTrails = true;
+let frame = 0;
+
+// ── Camera ────────────────────────────────────────────────────────────────────
+let camX = 0, camY = 0, camScale = 200;
+
+function updateCamera() {
+  if (!bodies.length) return;
+  // Center of mass
+  let mx = 0, my = 0, tm = 0;
+  for (const b of bodies) { mx += b.m * b.x; my += b.m * b.y; tm += b.m; }
+  const comX = mx / tm, comY = my / tm;
+  // Max radius from CoM
+  let maxR = 0.4;
+  for (const b of bodies) {
+    const r = Math.sqrt((b.x - comX)**2 + (b.y - comY)**2);
+    if (r > maxR) maxR = r;
+  }
+  // Smooth lerp
+  const tScale = (Math.min(W, H) * 0.38) / (maxR + 0.35);
+  camX     += (comX   - camX)     * 0.05;
+  camY     += (comY   - camY)     * 0.05;
+  camScale += (tScale - camScale) * 0.05;
+}
+
+function toScreen(wx, wy) {
+  return [CX + (wx - camX) * camScale,
+          CY + (wy - camY) * camScale];
+}
+
+// ── Background ────────────────────────────────────────────────────────────────
+function drawBg() {
+  const g = bgCtx.createRadialGradient(CX, CY, 0, CX, CY, Math.max(W, H) * 0.75);
+  g.addColorStop(0,   '#2a0e4a');
+  g.addColorStop(0.5, '#130828');
+  g.addColorStop(1,   '#060010');
+  bgCtx.fillStyle = g;
+  bgCtx.fillRect(0, 0, W, H);
+
+  const starPalette = ['#fff','#ffe0f0','#e0f0ff','#e0ffe0'];
+  for (let i = 0; i < 300; i++) {
+    bgCtx.beginPath();
+    bgCtx.arc(Math.random()*W, Math.random()*H, Math.random()*1.3+0.3, 0, Math.PI*2);
+    bgCtx.fillStyle = starPalette[Math.floor(Math.random()*4)];
+    bgCtx.globalAlpha = Math.random()*0.6+0.2;
+    bgCtx.fill();
+  }
+  bgCtx.globalAlpha = 1;
+
+  for (let i = 0; i < 20; i++) {
+    sparkle4(bgCtx, Math.random()*W, Math.random()*H, Math.random()*5+3, 'rgba(255,255,200,0.6)');
+  }
+}
+
+function resize() {
+  W = bgCanvas.width  = canvas.width  = window.innerWidth;
+  H = bgCanvas.height = canvas.height = window.innerHeight;
+  CX = W/2; CY = H/2;
+  drawBg();
+}
+window.addEventListener('resize', resize);
+
+// ── 4-pointed sparkle ─────────────────────────────────────────────────────────
+function sparkle4(c, x, y, size, color) {
+  if (!(size > 0)) return;
+  c.save();
+  c.translate(x, y);
+  c.fillStyle = color;
+  c.beginPath();
+  for (let p = 0; p < 4; p++) {
+    const a = (p / 4) * Math.PI * 2;
+    const b = a + Math.PI / 4;
+    c.lineTo(Math.cos(a)*size,        Math.sin(a)*size);
+    c.lineTo(Math.cos(b)*size*0.18,   Math.sin(b)*size*0.18);
+  }
+  c.closePath();
+  c.fill();
+  c.restore();
+}
+
+// ── Physics ───────────────────────────────────────────────────────────────────
+const G = 1.0;
+
+function accel(bs, i) {
+  let ax = 0, ay = 0;
+  for (let j = 0; j < bs.length; j++) {
+    if (i === j) continue;
+    const dx = bs[j].x - bs[i].x;
+    const dy = bs[j].y - bs[i].y;
+    const r2 = dx*dx + dy*dy + 0.01;
+    const f  = G * bs[j].m / (r2 * Math.sqrt(r2));
+    ax += f * dx;
+    ay += f * dy;
+  }
+  return [ax, ay];
+}
+
+function rk4Step(bs, dt) {
+  const n = bs.length;
+  // Save state
+  const x0  = bs.map(b => b.x),  y0  = bs.map(b => b.y);
+  const vx0 = bs.map(b => b.vx), vy0 = bs.map(b => b.vy);
+
+  function derivs(px, py, pvx, pvy) {
+    const snap = px.map((x, i) => ({ x, y: py[i], vx: pvx[i], vy: pvy[i], m: bs[i].m }));
+    const dvx = [], dvy = [];
+    for (let i = 0; i < n; i++) {
+      const [ax, ay] = accel(snap, i);
+      dvx.push(ax); dvy.push(ay);
+    }
+    return { dx: pvx.slice(), dy: pvy.slice(), dvx, dvy };
+  }
+
+  const k1 = derivs(x0, y0, vx0, vy0);
+  const k2 = derivs(
+    x0.map((v,i) => v + 0.5*dt*k1.dx[i]),  y0.map((v,i) => v + 0.5*dt*k1.dy[i]),
+    vx0.map((v,i) => v + 0.5*dt*k1.dvx[i]), vy0.map((v,i) => v + 0.5*dt*k1.dvy[i])
+  );
+  const k3 = derivs(
+    x0.map((v,i) => v + 0.5*dt*k2.dx[i]),  y0.map((v,i) => v + 0.5*dt*k2.dy[i]),
+    vx0.map((v,i) => v + 0.5*dt*k2.dvx[i]), vy0.map((v,i) => v + 0.5*dt*k2.dvy[i])
+  );
+  const k4 = derivs(
+    x0.map((v,i) => v + dt*k3.dx[i]),  y0.map((v,i) => v + dt*k3.dy[i]),
+    vx0.map((v,i) => v + dt*k3.dvx[i]), vy0.map((v,i) => v + dt*k3.dvy[i])
+  );
+
+  for (let i = 0; i < n; i++) {
+    bs[i].x  = x0[i]  + dt/6*(k1.dx[i]  + 2*k2.dx[i]  + 2*k3.dx[i]  + k4.dx[i]);
+    bs[i].y  = y0[i]  + dt/6*(k1.dy[i]  + 2*k2.dy[i]  + 2*k3.dy[i]  + k4.dy[i]);
+    bs[i].vx = vx0[i] + dt/6*(k1.dvx[i] + 2*k2.dvx[i] + 2*k3.dvx[i] + k4.dvx[i]);
+    bs[i].vy = vy0[i] + dt/6*(k1.dvy[i] + 2*k2.dvy[i] + 2*k3.dvy[i] + k4.dvy[i]);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+// Use a known chaotic (non-periodic) 3-body configuration.
+// Zero net momentum so the CoM stays fixed — bodies stay bounded near origin.
+function initSim() {
+  bodies = [
+    { x:  0.97000436, y: -0.24308753, vx:  0.4662036850, vy:  0.4323657300, m: 1.0 },
+    { x: -0.97000436, y:  0.24308753, vx:  0.4662036850, vy:  0.4323657300, m: 1.0 },
+    { x:  0.0,        y:  0.0,        vx: -0.9324073700, vy: -0.8647314600, m: 1.0 },
+  ];
+  // Nudge one body slightly to break the periodic figure-8 symmetry → chaos
+  bodies[0].vx += 0.07;
+  bodies[0].vy -= 0.05;
+  bodies[1].vx -= 0.04;
+  bodies[1].vy += 0.06;
+  // Re-zero net momentum so CoM stays put
+  let px = 0, py = 0;
+  for (const b of bodies) { px += b.vx; py += b.vy; }
+  for (const b of bodies) { b.vx -= px/3; b.vy -= py/3; }
+
+  trails   = [[], [], []];
+  sparkles = [];
+  camX = 0; camY = 0;
+  camScale = Math.min(W || 600, H || 600) * 0.27;
+}
+
+function resetSim()    { initSim(); }
+function togglePause() {
+  paused = !paused;
+  document.getElementById('pause-label').textContent = paused ? 'Resume' : 'Pause';
+}
+function toggleTrails() {
+  showTrails = !showTrails;
+  document.getElementById('trail-label').textContent = 'Trails: ' + (showTrails ? 'On' : 'Off');
+  if (!showTrails) trails = [[], [], []];
+}
+
+// ── Click to zap ──────────────────────────────────────────────────────────────
+canvas.addEventListener('click', (e) => {
+  if (!bodies.length) return;
+  const wx = (e.clientX - CX) / camScale + camX;
+  const wy = (e.clientY - CY) / camScale + camY;
+  const hitR2 = (50 / camScale) ** 2;
+  let hit = false;
+  for (let i = 0; i < bodies.length; i++) {
+    const dx = bodies[i].x - wx, dy = bodies[i].y - wy;
+    if (dx*dx + dy*dy < hitR2) {
+      bodies[i].vx += (Math.random()-0.5) * 1.2;
+      bodies[i].vy += (Math.random()-0.5) * 1.2;
+      const [sx, sy] = toScreen(bodies[i].x, bodies[i].y);
+      for (let k = 0; k < 6; k++) {
+        sparkles.push({ x: sx+(Math.random()-0.5)*30, y: sy+(Math.random()-0.5)*30,
+                        color: PPG[i].color, life: 1.0, size: 8+Math.random()*10 });
+      }
+      hit = true;
+    }
+  }
+  // Re-zero net momentum after any zap so the CoM stays fixed
+  // and gravity continues to act normally
+  if (hit) {
+    let px = 0, py = 0;
+    for (const b of bodies) { px += b.vx; py += b.vy; }
+    for (const b of bodies) { b.vx -= px/3; b.vy -= py/3; }
+  }
+});
+
+// ── Draw a Powerpuff Girl ─────────────────────────────────────────────────────
+function drawGirl(sx, sy, R, ppg, speed, angle) {
+  if (!(R > 1)) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  // Shadow
+  ctx.beginPath();
+  ctx.ellipse(2, R*0.65, R*0.55, R*0.14, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.fill();
+
+  // Flight cape
+  if (speed > 0.05) {
+    const capeLen = Math.min(speed * camScale * 0.55, R * 3.5);
+    ctx.save();
+    ctx.rotate(angle + Math.PI);
+    const cg = ctx.createLinearGradient(0, 0, capeLen, 0);
+    cg.addColorStop(0, ppg.color + 'bb');
+    cg.addColorStop(1, ppg.color + '00');
+    ctx.beginPath();
+    ctx.moveTo(0, -R*0.3);
+    ctx.quadraticCurveTo(capeLen*0.5, -R*0.12, capeLen, 0);
+    ctx.quadraticCurveTo(capeLen*0.5,  R*0.12, 0,  R*0.3);
+    ctx.closePath();
+    ctx.fillStyle = cg;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Glow aura
+  const aura = ctx.createRadialGradient(0, 0, R*0.4, 0, 0, R*2.2);
+  aura.addColorStop(0, ppg.color + '55');
+  aura.addColorStop(1, ppg.color + '00');
+  ctx.beginPath();
+  ctx.arc(0, 0, R*2.2, 0, Math.PI*2);
+  ctx.fillStyle = aura;
+  ctx.fill();
+
+  // Body (dress)
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, Math.PI*2);
+  ctx.fillStyle = ppg.color;
+  ctx.fill();
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = Math.max(1.5, R*0.1);
+  ctx.stroke();
+
+  // Waistband
+  ctx.beginPath();
+  ctx.arc(0, R*0.22, R*0.88, 0, Math.PI, false);
+  ctx.fillStyle = ppg.dark;
+  ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.fillRect(-R*0.88, R*0.18, R*1.76, R*0.1);
+
+  // Face
+  ctx.beginPath();
+  ctx.arc(0, -R*0.06, R*0.67, 0, Math.PI*2);
+  ctx.fillStyle = '#ffe0d0';
+  ctx.fill();
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = Math.max(1.2, R*0.08);
+  ctx.stroke();
+
+  // Hair
+  ctx.beginPath();
+  ctx.arc(0, -R*0.06, R*0.67, Math.PI, 0, false);
+  ctx.fillStyle = ppg.hair;
+  ctx.fill();
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = Math.max(1.2, R*0.08);
+  ctx.stroke();
+
+  // Eyes
+  const eyeY = -R*0.12, eyeSpread = R*0.21, eyeR = R*0.21;
+  for (const ex of [-eyeSpread, eyeSpread]) {
+    ctx.beginPath();
+    ctx.arc(ex, eyeY, eyeR, 0, Math.PI*2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = Math.max(1, R*0.07);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(ex + eyeSpread*0.08, eyeY + R*0.04, eyeR*0.54, 0, Math.PI*2);
+    ctx.fillStyle = ppg.eye;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(ex - eyeR*0.18, eyeY - eyeR*0.18, eyeR*0.22, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    ctx.fill();
+  }
+
+  // Smile
+  ctx.beginPath();
+  ctx.arc(0, eyeY + R*0.32, R*0.19, 0.2, Math.PI-0.2, false);
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = Math.max(1.2, R*0.08);
+  ctx.stroke();
+
+  // Blossom: bow
+  if (ppg.name === 'Blossom') {
+    ctx.save();
+    ctx.translate(0, -R*0.73);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = Math.max(1, R*0.07);
+    for (const [ex, rot] of [[-R*0.21, -0.4], [R*0.21, 0.4]]) {
+      ctx.beginPath();
+      ctx.ellipse(ex, 0, R*0.21, R*0.12, rot, 0, Math.PI*2);
+      ctx.fillStyle = '#ff2255';
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, R*0.09, 0, Math.PI*2);
+    ctx.fillStyle = '#cc0033';
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Bubbles: pigtail buns
+  if (ppg.name === 'Bubbles') {
+    for (const ex of [-R*0.71, R*0.71]) {
+      ctx.beginPath();
+      ctx.arc(ex, -R*0.44, R*0.17, 0, Math.PI*2);
+      ctx.fillStyle = '#f5d800';
+      ctx.fill();
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = Math.max(1, R*0.07);
+      ctx.stroke();
+    }
+  }
+
+  // Buttercup: cowlick
+  if (ppg.name === 'Buttercup') {
+    ctx.beginPath();
+    ctx.moveTo(-R*0.52, -R*0.52);
+    ctx.quadraticCurveTo(-R*0.88, -R*0.88, -R*0.28, -R*0.74);
+    ctx.strokeStyle = ppg.hair;
+    ctx.lineWidth = Math.max(2.5, R*0.17);
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = Math.max(1, R*0.06);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── Chaos label ───────────────────────────────────────────────────────────────
+function chaosEmoji() {
+  let v = 0;
+  for (const b of bodies) v += Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+  if (v < 1.5) return '😌 Chill';
+  if (v < 3)   return '😐 Wobbly';
+  if (v < 5)   return '😬 Shaky';
+  if (v < 8)   return '😱 Chaotic!';
+  return '🤯 MAYHEM!!!';
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  frame++;
+
+  // Speed: dt=0.005, 4 sub-steps per frame — visibly moving but not frantic
+  const dt = 0.005;
+  const stepsPerFrame = 4;
+
+  if (!paused && bodies.length) {
+    for (let s = 0; s < stepsPerFrame; s++) rk4Step(bodies, dt);
+
+    // Append to world-space trails
+    for (let i = 0; i < bodies.length; i++) {
+      trails[i].push([bodies[i].x, bodies[i].y]);
+      if (trails[i].length > 700) trails[i].shift();
+    }
+
+    // Occasional sparkle burst at body position
+    if (frame % 15 === 0) {
+      for (let i = 0; i < bodies.length; i++) {
+        if (Math.random() < 0.28) {
+          const [sx, sy] = toScreen(bodies[i].x, bodies[i].y);
+          sparkles.push({ x: sx+(Math.random()-0.5)*16, y: sy+(Math.random()-0.5)*16,
+                          color: PPG[i].color, life: 1.0, size: 5+Math.random()*7 });
+        }
+      }
+    }
+  }
+
+  // Camera update every frame
+  updateCamera();
+
+  // ── Draw ──────────────────────────────────────────────────────────────────
+  ctx.clearRect(0, 0, W, H);
+
+  // Trails — convert world→screen each frame (camera-consistent)
+  if (showTrails) {
+    for (let i = 0; i < bodies.length; i++) {
+      const trail = trails[i];
+      if (trail.length < 2) continue;
+      const col = PPG[i].color;
+      const rgb = parseInt(col.slice(1,3),16)+','+parseInt(col.slice(3,5),16)+','+parseInt(col.slice(5,7),16);
+      ctx.save();
+      ctx.lineCap = 'round';
+      for (let k = 1; k < trail.length; k++) {
+        const frac = k / trail.length;
+        const [x0, y0] = toScreen(trail[k-1][0], trail[k-1][1]);
+        const [x1, y1] = toScreen(trail[k][0],   trail[k][1]);
+        // Glow pass
+        ctx.beginPath();
+        ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
+        ctx.strokeStyle = `rgba(${rgb},${frac*0.15})`;
+        ctx.lineWidth = frac*8 + 1.5;
+        ctx.stroke();
+        // Core pass
+        ctx.strokeStyle = `rgba(${rgb},${frac*0.55})`;
+        ctx.lineWidth = frac*3;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // Sparkles (screen-space, decay each frame)
+  sparkles = sparkles.filter(s => s.life > 0.02);
+  for (const s of sparkles) {
+    s.life -= 0.035;
+    const alpha = Math.floor(Math.max(0, s.life) * 220).toString(16).padStart(2, '0');
+    sparkle4(ctx, s.x, s.y, s.size * s.life, s.color + alpha);
+  }
+
+  // Girls
+  const bodyR = Math.min(Math.max(camScale * 0.33, 26), Math.min(W, H) * 0.10);
+  for (let i = 0; i < bodies.length; i++) {
+    const b = bodies[i];
+    const [sx, sy] = toScreen(b.x, b.y);
+    drawGirl(sx, sy, bodyR, PPG[i], Math.sqrt(b.vx*b.vx + b.vy*b.vy), Math.atan2(b.vy, b.vx));
+  }
+
+  // Dashed gravity lines
+  ctx.save();
+  ctx.setLineDash([6, 8]);
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < bodies.length; i++) {
+    for (let j = i+1; j < bodies.length; j++) {
+      const dx = bodies[j].x - bodies[i].x;
+      const dy = bodies[j].y - bodies[i].y;
+      const alpha = Math.max(0, 0.2 - Math.sqrt(dx*dx+dy*dy)*0.07);
+      if (alpha > 0) {
+        const [ax, ay] = toScreen(bodies[i].x, bodies[i].y);
+        const [bx, by] = toScreen(bodies[j].x, bodies[j].y);
+        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // Chaos meter (throttled)
+  if (frame % 40 === 0 && bodies.length) {
+    document.getElementById('chaos-val').textContent = chaosEmoji();
+  }
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+resize();
+initSim();
+loop();
+</script>
+</body>
+</html>
+
